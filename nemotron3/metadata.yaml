@@ -35,9 +35,12 @@ downloads:
     - repo_id: 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16'
 
 repositories:
+  # TODO(runai-PR): revert to upstream NVIDIA-NeMo/Megatron-Bridge @ fab6803 once
+  # the RunAICliExecutor lands upstream. Pinned to the koiker fork branch commit
+  # so a clean install picks up the Run:ai executor.
   megatron_bridge:
-    url: "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git"
-    commit: "fab68031197b64934027e188c0cb417fdf1e1d7a"
+    url: "https://github.com/koiker/Megatron-Bridge.git"
+    commit: "baef4afa33811999cfff3bebd67a714946403f81"
 
   nemo_run:
     url: "https://github.com/NVIDIA-NeMo/Run.git"

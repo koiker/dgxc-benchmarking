@@ -30,9 +30,12 @@ container:
     - 'nvcr.io#nvidia/nemo:26.02.01'
 
 repositories:
+  # TODO(runai-PR): revert to upstream NVIDIA-NeMo/Megatron-Bridge @ f07871e once
+  # the RunAICliExecutor lands upstream. The koiker fork branch is f07871e + the
+  # Run:ai executor, so a clean install picks it up.
   megatron_bridge:
-    url: "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git"
-    commit: "f07871e23f637f4ae87d92256babc51fdbb12f39"
+    url: "https://github.com/koiker/Megatron-Bridge.git"
+    commit: "baef4afa33811999cfff3bebd67a714946403f81"
 
   nemo_run:
     url: "https://github.com/NVIDIA-NeMo/Run.git"
