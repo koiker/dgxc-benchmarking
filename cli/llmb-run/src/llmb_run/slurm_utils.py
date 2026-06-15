@@ -159,6 +159,11 @@ def get_cluster_name():
         logger.debug("ClusterName not found in SLURM config output")
         return None
 
+    except FileNotFoundError:
+        # Non-Slurm platforms (e.g. Run:ai) have no `scontrol` binary; treat as
+        # "no cluster name" rather than crashing the submission.
+        logger.debug("scontrol not found; skipping SLURM cluster name detection")
+        return None
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running scontrol show config: {e.stderr}")
         return None
