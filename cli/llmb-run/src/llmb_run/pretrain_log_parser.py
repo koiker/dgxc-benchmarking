@@ -38,6 +38,10 @@ _NEMO_TFLOPS_RE = re.compile(rf"TFLOPS_per_GPU:\s*{_NUMBER}")
 _MBRIDGE_TIME_RE = re.compile(rf"elapsed time per iteration \(ms\):\s*{_NUMBER}")
 _MBRIDGE_TFLOPS_RE = re.compile(rf"{_NUMBER}\s*(?:MODEL_TFLOP/s/GPU|TFLOP/s/GPU)")
 _MBRIDGE_NAN_GRAD_NORM_RE = re.compile(r"\bgrad[ _]norm\s*:\s*nan\b", re.IGNORECASE)
+# Some recipes (e.g. the Nemotron-3 / Nemotron-H performance scripts) emit a
+# custom per-step line instead of Megatron-LM's standard iteration logging:
+#   "Step Time : 16.75s GPU utilization: 697.3MODEL_TFLOP/s/GPU"
+_MBRIDGE_STEP_TIME_RE = re.compile(rf"Step Time\s*:\s*{_NUMBER}\s*s")
 
 
 class PretrainLogParseStatus(str, Enum):
@@ -253,6 +257,12 @@ def _parse_megatron_bridge_log(
             invalid_grad_norm_iteration=invalid_grad_norm_iteration,
         )
 
+    # No standard "iteration N/M ... elapsed time per iteration (ms)" lines were
+    # found. Fall back to the recipe's custom "Step Time" format, parsing each
+    # step line positionally (the Nth step == iteration N).
+    if not timing_samples:
+        return _parse_megatron_bridge_step_time_log(log_path, framework, min_iteration, max_iteration)
+
     times_seconds: list[float] = []
     tflops: list[float] = []
     perf_iterations_seen: set[int] = set()
@@ -266,6 +276,59 @@ def _parse_megatron_bridge_log(
         max_iteration_seen = _max_optional(max_iteration_seen, iteration)
         if index < len(tflops_samples):
             tflops.append(tflops_samples[index])
+
+    return _build_result(
+        parser="megatron_bridge",
+        framework=framework,
+        log_path=log_path,
+        times_seconds=times_seconds,
+        tflops=tflops,
+        perf_iterations_seen=perf_iterations_seen,
+        min_iteration=min_iteration,
+        max_iteration=max_iteration,
+        max_iteration_seen=max_iteration_seen,
+        final_iteration_seen=final_iteration_seen,
+    )
+
+
+def _parse_megatron_bridge_step_time_log(
+    log_path: pathlib.Path, framework: str, min_iteration: int, max_iteration: int
+) -> PretrainLogParseResult:
+    """Parse the custom 'Step Time : <s>s GPU utilization: <tflops>MODEL_TFLOP/s/GPU' format.
+
+    These lines carry no iteration index, so they are counted positionally: the
+    Nth ``Step Time`` line is treated as iteration N (1-based), matching how the
+    standard parser windows iterations 35-44.
+    """
+    step_times: list[float] = []
+    step_tflops: list[float | None] = []
+
+    with log_path.open("r", errors="replace") as f:
+        for line in f:
+            time_match = _MBRIDGE_STEP_TIME_RE.search(line)
+            if not time_match:
+                continue
+            step_times.append(float(time_match.group(1)))
+            tflops_match = _MBRIDGE_TFLOPS_RE.search(line)
+            step_tflops.append(float(tflops_match.group(1)) if tflops_match else None)
+
+    times_seconds: list[float] = []
+    tflops: list[float] = []
+    perf_iterations_seen: set[int] = set()
+    max_iteration_seen: int | None = None
+    for iteration, seconds in enumerate(step_times, start=1):
+        if not min_iteration <= iteration <= max_iteration:
+            continue
+        times_seconds.append(seconds)
+        perf_iterations_seen.add(iteration)
+        max_iteration_seen = _max_optional(max_iteration_seen, iteration)
+        tflop_value = step_tflops[iteration - 1]
+        if tflop_value is not None:
+            tflops.append(tflop_value)
+
+    # We can't see a "final" marker in this format; treat reaching the window's
+    # last iteration as completion so a full run parses as SUCCESS.
+    final_iteration_seen = len(step_times) >= max_iteration
 
     return _build_result(
         parser="megatron_bridge",

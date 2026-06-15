@@ -38,18 +38,24 @@ from rich.console import Console
 from rich.table import Table
 
 from llmb_run.config_manager import ClusterConfig
+from llmb_run.job_logs import find_runai_master_log
 from llmb_run.pretrain_log_parser import (
     PretrainLogParseResult,
     PretrainLogParseStatus,
     parse_latest_pretrain_job_log,
+    parse_pretrain_log,
     parser_name_for_framework,
 )
+from llmb_run.runai_utils import RunaiAccountingRecord, get_runai_job_statuses, parse_runai_job_handle
 from llmb_run.slurm_utils import SlurmAccountingRecord, SlurmJob, get_slurm_job_statuses, parse_slurm_job_id
 from llmb_run.tasks import WorkloadTask
 
 logger = logging.getLogger('llmb_run.job_history')
 
-DB_SCHEMA_VERSION = 1
+# v2 added the platform / platform_job_name columns so non-Slurm platforms
+# (Run:ai) can record and refresh jobs. The columns are added by an additive
+# migration so existing v1 databases keep working.
+DB_SCHEMA_VERSION = 2
 HISTORY_DIR_NAME = ".llmb"
 HISTORY_DB_NAME = "jobs.sqlite3"
 # sacct accounting can lag behind sbatch by several seconds; don't mark a job
@@ -72,6 +78,8 @@ TERMINAL_STATES = {
 class JobRecord:
     job_id: int
     launcher_type: str
+    platform: str = "slurm"
+    platform_job_name: str | None = None
     workload_key: str | None = None
     model_name: str | None = None
     model_size: str | None = None
@@ -109,6 +117,17 @@ def is_terminal_state(state: str | None) -> bool:
     return base_slurm_state(state) in TERMINAL_STATES
 
 
+def _config_platform(config: ClusterConfig) -> str:
+    """Return the lower-cased platform for a cluster config (defaults to slurm)."""
+    return (getattr(config, "platform", None) or "slurm").strip().lower()
+
+
+def _runai_project(config: ClusterConfig) -> str | None:
+    environment = getattr(config, "environment", None) or {}
+    project = environment.get("DGXC_PROJECT_NAME")
+    return str(project) if project else None
+
+
 @contextlib.contextmanager
 def _open_history_db(config: ClusterConfig) -> Iterator[sqlite3.Connection]:
     """Open the history DB, creating the parent dir and ensuring the schema."""
@@ -132,7 +151,12 @@ def record_job_submission(
         return
 
     try:
-        job_id = parse_slurm_job_id(slurm_job.job_id)
+        platform = _config_platform(config)
+        if platform == "runai":
+            job_id, platform_job_name = parse_runai_job_handle(slurm_job.job_id)
+        else:
+            job_id = parse_slurm_job_id(slurm_job.job_id)
+            platform_job_name = None
 
         llmb_config_path = slurm_job.llmb_config_path
         log_dir = slurm_job.job_workdir or (str(pathlib.Path(llmb_config_path).parent) if llmb_config_path else None)
@@ -150,6 +174,8 @@ def record_job_submission(
         record = JobRecord(
             job_id=job_id,
             launcher_type=launcher_type,
+            platform=platform,
+            platform_job_name=platform_job_name,
             workload_key=task.workload_key,
             model_name=model_name,
             model_size=task.model_size,
@@ -180,6 +206,8 @@ def upsert_static_job(config: ClusterConfig, record: JobRecord) -> None:
             INSERT INTO jobs (
                 job_id,
                 launcher_type,
+                platform,
+                platform_job_name,
                 workload_key,
                 model_name,
                 model_size,
@@ -195,9 +223,11 @@ def upsert_static_job(config: ClusterConfig, record: JobRecord) -> None:
                 env_overrides_json,
                 model_overrides_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 launcher_type = excluded.launcher_type,
+                platform = excluded.platform,
+                platform_job_name = excluded.platform_job_name,
                 workload_key = excluded.workload_key,
                 model_name = excluded.model_name,
                 model_size = excluded.model_size,
@@ -214,6 +244,8 @@ def upsert_static_job(config: ClusterConfig, record: JobRecord) -> None:
             (
                 record.job_id,
                 record.launcher_type,
+                record.platform,
+                record.platform_job_name,
                 record.workload_key,
                 record.model_name,
                 record.model_size,
@@ -265,7 +297,7 @@ def refresh_non_terminal_jobs(config: ClusterConfig) -> tuple[int, str | None]:
         rows = list(conn.execute("SELECT job_id, slurm_state FROM jobs ORDER BY job_id"))
     job_ids = [int(row["job_id"]) for row in rows if not is_terminal_state(row["slurm_state"])]
 
-    refreshed, error = _refresh_slurm_statuses(config, job_ids)
+    refreshed, error = _refresh_statuses(config, job_ids)
     if error is None:
         _update_terminal_job_results(config)
     return refreshed, error
@@ -273,10 +305,62 @@ def refresh_non_terminal_jobs(config: ClusterConfig) -> tuple[int, str | None]:
 
 def refresh_requested_jobs(config: ClusterConfig, job_ids: list[int]) -> tuple[int, str | None]:
     """Force-refresh the requested jobs and update terminal results."""
-    refreshed, error = _refresh_slurm_statuses(config, job_ids)
+    refreshed, error = _refresh_statuses(config, job_ids)
     if error is None:
         _update_terminal_job_results(config, job_ids=job_ids, reparse_existing=True)
     return refreshed, error
+
+
+def _refresh_statuses(config: ClusterConfig, job_ids: list[int]) -> tuple[int, str | None]:
+    """Dispatch a status refresh to the configured platform's backend."""
+    if _config_platform(config) == "runai":
+        return _refresh_runai_statuses(config, job_ids)
+    return _refresh_slurm_statuses(config, job_ids)
+
+
+def _refresh_runai_statuses(config: ClusterConfig, job_ids: list[int]) -> tuple[int, str | None]:
+    """Refresh status for Run:ai jobs via the ``runai`` CLI.
+
+    Jobs absent from ``runai list`` are marked PURGED (same grace window as the
+    sacct path). Returns ``(refreshed_count, error)``; error is None on success.
+    """
+    if not job_ids:
+        return 0, None
+
+    project = _runai_project(config)
+    if not project:
+        return 0, "DGXC_PROJECT_NAME not set in cluster config"
+
+    wanted = sorted({int(job_id) for job_id in job_ids})
+    with _open_history_db(config) as conn:
+        placeholders = ",".join("?" for _ in wanted)
+        rows = list(
+            conn.execute(
+                f"SELECT job_id, platform_job_name FROM jobs WHERE job_id IN ({placeholders})",
+                wanted,
+            )
+        )
+    name_to_id = {row["platform_job_name"]: int(row["job_id"]) for row in rows if row["platform_job_name"]}
+    if not name_to_id:
+        return 0, None
+
+    records = get_runai_job_statuses(project, name_to_id)
+    if records is None:
+        return 0, "runai status query failed"
+
+    refreshed = 0
+    with _open_history_db(config) as conn:
+        for job_id in name_to_id.values():
+            record = records.get(job_id)
+            if record is not None:
+                _update_slurm_record(conn, record)
+                refreshed += 1
+            elif _mark_job_purged(conn, job_id):
+                refreshed += 1
+            # else: still inside PURGE_GRACE_SECONDS — leave for the next refresh.
+        conn.commit()
+
+    return refreshed, None
 
 
 def _refresh_slurm_statuses(config: ClusterConfig, job_ids: list[int]) -> tuple[int, str | None]:
@@ -320,9 +404,10 @@ def rebuild_history(config: ClusterConfig, workloads: dict[str, Any]) -> Rebuild
     if not workloads_root.exists():
         return RebuildStats(scanned=0, imported=0, skipped=0, db_path=db_path)
 
+    platform = _config_platform(config)
     for config_path in sorted(workloads_root.glob("**/llmb-config_*.yaml")):
         scanned += 1
-        record = job_record_from_config(config.llmb_install, config_path, workloads)
+        record = job_record_from_config(config.llmb_install, config_path, workloads, platform=platform)
         if record is None:
             skipped += 1
             continue
@@ -331,7 +416,7 @@ def rebuild_history(config: ClusterConfig, workloads: dict[str, Any]) -> Rebuild
         imported += 1
         imported_job_ids.append(record.job_id)
 
-    _, refresh_error = _refresh_slurm_statuses(config, imported_job_ids)
+    _, refresh_error = _refresh_statuses(config, imported_job_ids)
     if refresh_error is None:
         _update_terminal_job_results(config)
     return RebuildStats(
@@ -340,7 +425,10 @@ def rebuild_history(config: ClusterConfig, workloads: dict[str, Any]) -> Rebuild
 
 
 def job_record_from_config(
-    llmb_install: str | pathlib.Path, config_path: pathlib.Path, workloads: dict[str, Any]
+    llmb_install: str | pathlib.Path,
+    config_path: pathlib.Path,
+    workloads: dict[str, Any],
+    platform: str = "slurm",
 ) -> JobRecord | None:
     config_data = _load_llmb_config(config_path)
     if not config_data:
@@ -351,8 +439,12 @@ def job_record_from_config(
     job_config = config_data.get('job_config') or {}
 
     raw_job_id = job_info.get('job_id') or _job_id_from_config_filename(config_path)
+    platform_job_name: str | None = None
     try:
-        job_id = parse_slurm_job_id(raw_job_id)
+        if platform == "runai":
+            job_id, platform_job_name = parse_runai_job_handle(raw_job_id)
+        else:
+            job_id = parse_slurm_job_id(raw_job_id)
     except ValueError:
         logger.debug(f"Skipping llmb config without a parseable job id: {config_path}")
         return None
@@ -381,6 +473,8 @@ def job_record_from_config(
     return JobRecord(
         job_id=job_id,
         launcher_type=launcher_type,
+        platform=platform,
+        platform_job_name=platform_job_name,
         workload_key=workload_key,
         model_name=model_info.get('model_name'),
         model_size=model_info.get('model_size'),
@@ -428,7 +522,7 @@ def format_jobs_table(rows: list[sqlite3.Row]) -> str:
     table.add_column("Job ID", justify="right")
     table.add_column("Profile")
     table.add_column("Submit Time")
-    table.add_column("Slurm Status")
+    table.add_column("Status")
     table.add_column("Elapsed")
     table.add_column("s/iter", justify="right")
     table.add_column("TFLOPS/GPU", justify="right")
@@ -465,6 +559,7 @@ def format_jobs_table(rows: list[sqlite3.Row]) -> str:
 def format_job_details(row: sqlite3.Row) -> str:
     details = [
         ("Job ID", str(row["job_id"])),
+        ("Platform", row["platform"] if "platform" in row.keys() else None),
         ("Launcher", row["launcher_type"]),
         ("Workload", row["workload_key"]),
         ("Model", _display_model(row)),
@@ -515,6 +610,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS jobs (
             job_id INTEGER PRIMARY KEY,
             launcher_type TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'slurm',
+            platform_job_name TEXT,
             workload_key TEXT,
             model_name TEXT,
             model_size TEXT,
@@ -539,6 +636,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             perf_parse_status TEXT
         )
         """)
+    _migrate_jobs_columns(conn)
     conn.execute(
         """
         INSERT INTO metadata (key, value)
@@ -549,17 +647,29 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _update_slurm_record(conn: sqlite3.Connection, record: SlurmAccountingRecord) -> None:
+def _migrate_jobs_columns(conn: sqlite3.Connection) -> None:
+    """Additively add columns introduced after v1 so old DBs keep working."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "platform" not in existing:
+        conn.execute("ALTER TABLE jobs ADD COLUMN platform TEXT NOT NULL DEFAULT 'slurm'")
+    if "platform_job_name" not in existing:
+        conn.execute("ALTER TABLE jobs ADD COLUMN platform_job_name TEXT")
+
+
+def _update_slurm_record(conn: sqlite3.Connection, record: SlurmAccountingRecord | RunaiAccountingRecord) -> None:
     now = _now_iso()
+    # COALESCE(NULLIF(?, ''), col) keeps the previous value when the backend
+    # returns an empty field. Slurm/sacct always populates these so it is a
+    # no-op there; on Run:ai a transient `describe` miss won't wipe good data.
     conn.execute(
         """
         UPDATE jobs
         SET
             slurm_state = ?,
-            elapsed = ?,
-            submit_time = ?,
-            node_list = ?,
-            exit_code = ?,
+            elapsed = COALESCE(NULLIF(?, ''), elapsed),
+            submit_time = COALESCE(NULLIF(?, ''), submit_time),
+            node_list = COALESCE(NULLIF(?, ''), node_list),
+            exit_code = COALESCE(NULLIF(?, ''), exit_code),
             last_status_refresh = ?,
             updated_at = ?
         WHERE job_id = ?
@@ -666,6 +776,14 @@ def _parse_job_performance(row: sqlite3.Row) -> PretrainLogParseResult | None:
         return None
 
     try:
+        if (row["platform"] or "slurm") == "runai":
+            # Run:ai/nemo_run name per-rank logs log_<workload>-master-0.out rather
+            # than the Slurm log-..._<jobid>_<retry>.out convention; the master rank
+            # carries the perf metrics.
+            log_path = find_runai_master_log(row["log_dir"], row["platform_job_name"])
+            if log_path is None:
+                return None
+            return parse_pretrain_log(log_path, framework)
         return parse_latest_pretrain_job_log(row["log_dir"], int(row["job_id"]), framework)
     except OSError as e:
         logger.debug(f"Unable to parse perf log for job {row['job_id']}: {e}")

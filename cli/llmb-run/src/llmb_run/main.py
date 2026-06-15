@@ -44,7 +44,14 @@ from llmb_run.job_history import (
     refresh_requested_jobs,
 )
 from llmb_run.job_launcher import run_tests
-from llmb_run.job_logs import active_job_log, find_configured_sbatch_logs, find_job_logs, follow_tail, read_tail
+from llmb_run.job_logs import (
+    active_job_log,
+    find_configured_sbatch_logs,
+    find_job_logs,
+    find_runai_job_logs,
+    follow_tail,
+    read_tail,
+)
 from llmb_run.metadata_utils import parse_workload_name
 from llmb_run.slurm_args import build_cli_slurm_args, validate_no_additional_slurm_params_conflict
 from llmb_run.task_generation import TaskGenerationRequest, ValidationError, generate_tasks
@@ -384,12 +391,12 @@ def jobs_callback(ctx: typer.Context):
 
 @jobs_app.command(name="list")
 def jobs_list(ctx: typer.Context):
-    """List known jobs and refresh non-terminal Slurm states."""
+    """List known jobs and refresh non-terminal job states."""
     _jobs_list_impl(ctx)
 
 
 @jobs_app.command(name="show")
-def jobs_show(ctx: typer.Context, job_id: Annotated[int, typer.Argument(help='Slurm job ID to show.')]):
+def jobs_show(ctx: typer.Context, job_id: Annotated[int, typer.Argument(help='Job ID to show.')]):
     """Show details for a single job, including its log directory."""
     app_ctx = _ctx_app_context(ctx)
     _, refresh_error = refresh_non_terminal_jobs(app_ctx.cluster_config)
@@ -402,7 +409,7 @@ def jobs_show(ctx: typer.Context, job_id: Annotated[int, typer.Argument(help='Sl
 @jobs_app.command(name="log")
 def jobs_log(
     ctx: typer.Context,
-    job_id: Annotated[int, typer.Argument(help='Slurm job ID to inspect.')],
+    job_id: Annotated[int, typer.Argument(help='Job ID to inspect.')],
     tail_lines: Annotated[int, typer.Option('--tail', min=1, help='Number of lines to show.')] = 200,
     follow: Annotated[
         bool, typer.Option('-f', '--follow', help='Follow the active log file after printing the initial tail.')
@@ -436,8 +443,11 @@ def jobs_log(
         typer.echo(log_dir)
         return
 
+    platform = (row["platform"] or "slurm") if "platform" in row.keys() else "slurm"
     try:
-        if launcher_type in {'nemo', 'megatron_bridge'}:
+        if platform == "runai":
+            logs = find_runai_job_logs(log_dir, row["platform_job_name"])
+        elif launcher_type in {'nemo', 'megatron_bridge'}:
             logs = find_job_logs(log_dir, job_id)
         elif launcher_type == 'configured_sbatch':
             logs = find_configured_sbatch_logs(log_dir, job_id)
@@ -455,7 +465,12 @@ def jobs_log(
             return
         for log_file in logs:
             suffix = " (active)" if log_file == active_log else ""
-            label = str(log_file.retry) if log_file.retry is not None else "slurm"
+            if log_file.retry is not None:
+                label = str(log_file.retry)
+            elif platform == "runai":
+                label = log_file.path.name
+            else:
+                label = "slurm"
             typer.echo(f"{label}: {log_file.path}{suffix}")
         return
 

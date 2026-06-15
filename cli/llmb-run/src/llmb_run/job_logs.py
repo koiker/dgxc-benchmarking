@@ -48,6 +48,65 @@ def find_job_logs(log_dir: str | pathlib.Path, job_id: int) -> list[JobLogFile]:
     return sorted(logs, key=lambda f: f.retry)
 
 
+_RUNAI_MASTER_LOG_RE = re.compile(r"^log_.*-master-0\.out$")
+
+
+def find_runai_master_log(
+    log_dir: str | pathlib.Path, workload_name: str | None = None
+) -> pathlib.Path | None:
+    """Locate the Run:ai master-rank workload log in an experiment directory.
+
+    nemo_run writes per-rank logs as ``log_<workload>-<role>-<n>.out``. The
+    master rank (``-master-0``) carries the training perf metrics. Prefers an
+    exact match on ``workload_name`` and falls back to any ``*-master-0.out``.
+    """
+    directory = pathlib.Path(log_dir)
+    if not directory.is_dir():
+        return None
+
+    if workload_name:
+        exact = directory / f"log_{workload_name}-master-0.out"
+        if exact.is_file():
+            return exact
+
+    candidates = [
+        path for path in directory.iterdir() if path.is_file() and _RUNAI_MASTER_LOG_RE.match(path.name)
+    ]
+    return sorted(candidates)[0] if candidates else None
+
+
+def find_runai_job_logs(
+    log_dir: str | pathlib.Path, workload_name: str | None = None
+) -> list[JobLogFile]:
+    """Find Run:ai per-rank workload logs, ordered with the master rank last.
+
+    ``active_job_log`` returns the final entry, so ordering worker ranks before
+    the master makes the master log the active one for `jobs log`.
+    """
+    directory = pathlib.Path(log_dir)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Log directory not found: {directory}")
+
+    rank_re = re.compile(r"^log_.*-(master|worker)-(\d+)\.out$")
+    workers: list[pathlib.Path] = []
+    master: pathlib.Path | None = None
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        match = rank_re.match(path.name)
+        if not match:
+            continue
+        if match.group(1) == "master":
+            master = path
+        else:
+            workers.append(path)
+
+    ordered = [JobLogFile(path=path) for path in sorted(workers)]
+    if master is not None:
+        ordered.append(JobLogFile(path=master))
+    return ordered
+
+
 def find_configured_sbatch_logs(log_dir: str | pathlib.Path, job_id: int) -> list[JobLogFile]:
     """Find configured_sbatch logs, preferring workload logs over Slurm stdout."""
     logs = find_job_logs(log_dir, job_id)
