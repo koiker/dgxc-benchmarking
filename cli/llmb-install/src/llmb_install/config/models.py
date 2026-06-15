@@ -70,21 +70,65 @@ class SlurmConfig(BaseModel):
     cpu_partition_gres: Optional[int] = None
 
 
+class RunAIConfig(BaseModel):
+    """Run:ai (NVIDIA Run:ai / DGX Cloud) cluster configuration.
+
+    Unlike Slurm, Run:ai schedules OCI container images directly onto Kubernetes
+    nodes, so there is no enroot/sqsh build step. Submission is done with the
+    ``runai`` CLI (after an interactive ``runai login``), so no Application
+    credentials (app_id/app_secret) are required.
+    """
+
+    # Run:ai project (Kubernetes namespace) jobs are submitted into.
+    project_name: NonBlankStr
+    # Existing PVC providing the shared workspace (NEMORUN_HOME, HF cache, etc.).
+    pvc_claim_name: NonBlankStr
+    pvc_mount_path: NonBlankStr = "/nemo-workspace"
+    # OCI image Run:ai pulls for every pod (no sqsh). e.g. nvcr.io/nvidia/nemo:25.04.
+    container_image: NonBlankStr
+    # RoCE/GDR rails exposed as Kubernetes extended resources, one per rail,
+    # e.g. ["nvidia.com/r0-p0=1", ...]. Empty => rely on default networking.
+    extended_resources: List[str] = []
+    # Multus network annotations (k8s.v1.cni.cncf.io/networks=...), one per entry.
+    annotations: List[str] = []
+    # Enlarge /dev/shm (runai --large-shm) for dataloader shared memory.
+    large_shm: bool = True
+    # Place the RoCE rails on the master pod too (not just workers).
+    rails_on_master: bool = True
+    # Optional Run:ai node pool(s) to target.
+    node_pools: Optional[str] = None
+
+
 class ClusterSettings(BaseModel):
     """Base cluster configuration shared across all config models.
 
     Contains the stable settings that describe a cluster environment:
-    GPU type, architecture, venv strategy, slurm configuration, etc.
+    GPU type, architecture, venv strategy, slurm/runai configuration, etc.
     """
 
     venv_type: Literal['uv', 'venv', 'conda']
     gpu_type: GpuType
     node_architecture: Literal['x86_64', 'aarch64']
+    # Launch platform recorded in cluster_config.yaml and used by llmb-run.
+    platform: Literal['slurm', 'runai'] = 'slurm'
     install_method: Literal['local', 'slurm'] = 'slurm'
     slurm: Optional[SlurmConfig] = None
+    runai: Optional[RunAIConfig] = None
     workload_selection_mode: Literal['custom', 'exemplar'] = 'custom'
     environment_vars: EnvironmentVars = {}
     image_folder: Optional[str] = None
+
+    @model_validator(mode='after')
+    def _validate_platform_install_method(self) -> 'ClusterSettings':
+        # Run:ai pulls OCI images directly and runs install-time tasks (HF asset
+        # prefetch, tool downloads) on the login node; there is no srun/enroot
+        # path, so 'slurm' install_method is invalid for the runai platform.
+        if self.platform == 'runai' and self.install_method == 'slurm':
+            raise ValueError(
+                "install_method='slurm' is not supported with platform='runai'. "
+                "Use install_method='local' (install-time tasks run on the login node)."
+            )
+        return self
 
 
 class PlayfileConfig(ClusterSettings):
@@ -92,13 +136,13 @@ class PlayfileConfig(ClusterSettings):
 
     Defines the fields that are valid in a playfile YAML, along with
     playfile-specific validation rules (non-empty workloads, deprecated
-    key rejection). Slurm configuration is always required.
+    key rejection). The platform-specific block (slurm or runai) is
+    required for the selected platform.
     """
 
     install_path: NonBlankStr
     install_method: Literal['local', 'slurm']  # required in playfiles (no default)
     selected_workloads: List[NonBlankStr]
-    slurm: SlurmConfig  # required in playfiles (no default)
 
     @model_validator(mode='before')
     @classmethod
@@ -117,6 +161,11 @@ class PlayfileConfig(ClusterSettings):
     def validate_playfile_rules(self) -> 'PlayfileConfig':
         if not self.selected_workloads:
             raise ValueError("selected_workloads cannot be empty")
+        # Require the config block matching the chosen platform.
+        if self.platform == 'slurm' and self.slurm is None:
+            raise ValueError("platform='slurm' requires a top-level 'slurm' block in the playfile.")
+        if self.platform == 'runai' and self.runai is None:
+            raise ValueError("platform='runai' requires a top-level 'runai' block in the playfile.")
         return self
 
 
@@ -148,9 +197,18 @@ class InstallConfig(ClusterSettings):
     @property
     def locked_fields_for_resume(self) -> List[str]:
         """Get list of fields that cannot be changed during resume edit."""
-        return ['install_path', 'gpu_type', 'node_architecture', 'venv_type', 'llmb_repo', 'dev_mode', 'image_folder']
+        return [
+            'install_path',
+            'gpu_type',
+            'node_architecture',
+            'venv_type',
+            'llmb_repo',
+            'dev_mode',
+            'image_folder',
+            'platform',
+        ]
 
     @property
     def editable_fields_for_resume(self) -> List[str]:
         """Get list of fields that can be changed during resume edit."""
-        return ['slurm', 'install_method', 'selected_workloads']
+        return ['slurm', 'runai', 'install_method', 'selected_workloads']

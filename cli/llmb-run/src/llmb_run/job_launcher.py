@@ -177,8 +177,10 @@ def parse_nemo2_output(output: str) -> tuple[str, str, str]:
 
     task_0_section = task_0_match.group(0)
 
-    # Look for job ID pattern within Task 0 section: "- Job id: 3530909"
-    job_id_match = re.search(r'- Job id:\s+(\d+)', task_0_section)
+    # Look for job ID pattern within Task 0 section: "- Job id: 3530909" (Slurm/NeMo)
+    # or a non-numeric handle for non-Slurm executors, e.g. Run:ai/DGX Cloud:
+    # "- Job id: pretrain_..._1781530681___...___pretrain-...-gpu".
+    job_id_match = re.search(r'- Job id:\s+(\S+)', task_0_section)
     if job_id_match:
         job_id = job_id_match.group(1)
 
@@ -710,11 +712,16 @@ class Nemo2Launcher(JobLauncher):
                     )
                     return SlurmJob(job_id=None, job_workdir=None)
                 else:
-                    try:
-                        parsed_job_id = parse_slurm_job_id(job_id)
-                    except ValueError as e:
-                        logger.error(format_task_output(task, prefix="ERROR: ", suffix=str(e)))
-                        return SlurmJob(job_id=None, job_workdir=None)
+                    # Slurm reports a numeric job id; non-Slurm executors (e.g. Run:ai/DGX Cloud
+                    # via the dgx_cloud scheduler) return a native string handle instead.
+                    if getattr(self.config, 'platform', 'slurm') == 'slurm':
+                        try:
+                            parsed_job_id = parse_slurm_job_id(job_id)
+                        except ValueError as e:
+                            logger.error(format_task_output(task, prefix="ERROR: ", suffix=str(e)))
+                            return SlurmJob(job_id=None, job_workdir=None)
+                    else:
+                        parsed_job_id = job_id
                     logger.info(format_task_output(task, prefix="LAUNCHED: ", suffix=f"jobid={job_id}"))
                     logger.info(f"JobID: {job_id}, Workdir: {local_dir}")
 

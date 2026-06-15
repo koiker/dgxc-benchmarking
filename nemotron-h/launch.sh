@@ -137,6 +137,60 @@ if { [[ $GPU_TYPE == "gb300" ]] || [[ $GPU_TYPE == "gb200" ]] || [[ $GPU_TYPE ==
     export NCCL_IB_QPS_PER_CONNECTION=${NCCL_IB_QPS_PER_CONNECTION:-4}
 fi
 
+# Platform selection:
+#   slurm (default) | runai (runai CLI, SSO login, NO app creds) | dgxc (REST API, app_id/app_secret)
+PLATFORM=${PLATFORM:-slurm}
+PLATFORM=${PLATFORM,,}
+
+if [[ $PLATFORM == "runai" ]]; then
+    # Run:ai via the `runai` CLI — analogous to sbatch: requires a prior `runai login` (SSO),
+    # NOT a Run:ai Application. No DGXC_BASE_URL / DGXC_APP_ID / DGXC_APP_SECRET needed.
+    : "${DGXC_PROJECT_NAME:?DGXC_PROJECT_NAME is required for PLATFORM=runai (e.g. nccl-benchmarking)}"
+    : "${DGXC_PVC_CLAIM_NAME:?DGXC_PVC_CLAIM_NAME is required for PLATFORM=runai (e.g. nemo-workspace)}"
+    DGXC_PVC_MOUNT_PATH=${DGXC_PVC_MOUNT_PATH:-/nemo-workspace}
+    PLATFORM_ARGS=(
+        --platform runai
+        --dgxc_project_name "$DGXC_PROJECT_NAME"
+        --dgxc_pvc_claim_name "$DGXC_PVC_CLAIM_NAME"
+        --dgxc_pvc_mount_path "$DGXC_PVC_MOUNT_PATH"
+    )
+    # RoCE/GDR rails + Multus network annotations (space-separated lists -> repeated flags).
+    for _res in ${RUNAI_EXTENDED_RESOURCES:-}; do PLATFORM_ARGS+=(--runai_extended_resource "$_res"); done
+    for _ann in ${RUNAI_ANNOTATIONS:-}; do PLATFORM_ARGS+=(--runai_annotation "$_ann"); done
+    for _ex in ${RUNAI_EXTRA_SUBMIT_ARGS:-}; do PLATFORM_ARGS+=(--runai_extra_submit_arg "$_ex"); done
+    [[ -n ${RUNAI_NODE_POOLS:-} ]] && PLATFORM_ARGS+=(--runai_node_pools "$RUNAI_NODE_POOLS")
+    [[ -n ${RUNAI_LARGE_SHM:-} ]] && PLATFORM_ARGS+=(--runai_large_shm "$RUNAI_LARGE_SHM")
+    [[ -n ${RUNAI_RAILS_ON_MASTER:-} ]] && PLATFORM_ARGS+=(--runai_rails_on_master "$RUNAI_RAILS_ON_MASTER")
+    [[ ${RUNAI_PRINT_ONLY:-0} == "1" ]] && PLATFORM_ARGS+=(--runai_print_only)
+elif [[ $PLATFORM == "dgxc" ]]; then
+    : "${DGXC_BASE_URL:?DGXC_BASE_URL is required for PLATFORM=dgxc (e.g. https://runai-apex1.mayo.edu/api/v1)}"
+    : "${DGXC_APP_ID:?DGXC_APP_ID is required for PLATFORM=dgxc (Run:ai Application client ID)}"
+    : "${DGXC_APP_SECRET:?DGXC_APP_SECRET is required for PLATFORM=dgxc (Run:ai Application client secret)}"
+    : "${DGXC_PROJECT_NAME:?DGXC_PROJECT_NAME is required for PLATFORM=dgxc (e.g. nccl-benchmarking)}"
+    : "${DGXC_PVC_CLAIM_NAME:?DGXC_PVC_CLAIM_NAME is required for PLATFORM=dgxc (e.g. nemo-workspace)}"
+    DGXC_PVC_MOUNT_PATH=${DGXC_PVC_MOUNT_PATH:-/nemo-workspace}
+    PLATFORM_ARGS=(
+        --platform dgxc
+        --dgxc_base_url "$DGXC_BASE_URL"
+        --dgxc_app_id "$DGXC_APP_ID"
+        --dgxc_app_secret "$DGXC_APP_SECRET"
+        --dgxc_project_name "$DGXC_PROJECT_NAME"
+        --dgxc_pvc_claim_name "$DGXC_PVC_CLAIM_NAME"
+        --dgxc_pvc_mount_path "$DGXC_PVC_MOUNT_PATH"
+    )
+    [[ -n ${DGXC_CLUSTER:-} ]] && PLATFORM_ARGS+=(--dgxc_cluster "$DGXC_CLUSTER")
+    [[ -n ${DGXC_KUBE_APISERVER_URL:-} ]] && PLATFORM_ARGS+=(--dgxc_kube_apiserver_url "$DGXC_KUBE_APISERVER_URL")
+else
+    : "${SBATCH_ACCOUNT:?SBATCH_ACCOUNT is required for PLATFORM=slurm}"
+    : "${SBATCH_PARTITION:?SBATCH_PARTITION is required for PLATFORM=slurm}"
+    PLATFORM_ARGS=(
+        --platform slurm
+        --account "$SBATCH_ACCOUNT"
+        --partition "$SBATCH_PARTITION"
+    )
+    [[ -n ${SLURM_ARGS} ]] && PLATFORM_ARGS+=(${SLURM_ARGS})
+fi
+
 # run command
 pushd $LLMB_WORKLOAD/Megatron-Bridge
 
@@ -150,11 +204,9 @@ python3 scripts/performance/setup_experiment.py \
     --model_family_name nemotronh \
     --model_recipe_name nemotronh_56b \
     ${CONFIG_OVERRIDES} \
-    --account $SBATCH_ACCOUNT \
-    --partition $SBATCH_PARTITION \
     --log_dir $NEMORUN_HOME \
     --time_limit $TIME_LIMIT \
     --max_steps $MAX_STEPS \
-    $SLURM_ARGS
+    "${PLATFORM_ARGS[@]}"
 
 popd

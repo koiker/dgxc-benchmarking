@@ -62,6 +62,7 @@ from llmb_install.core.workload import (
 )
 from llmb_install.downloads.huggingface import download_huggingface_files_for_workloads
 from llmb_install.downloads.image import fetch_container_images, get_required_images
+from llmb_install.downloads.runai import gpus_per_node_for, prepull_images_runai
 from llmb_install.downloads.tools import fetch_and_install_tools, get_required_tools
 from llmb_install.environment.cache import setup_cache_directories
 from llmb_install.environment.venv_manager import (
@@ -153,9 +154,14 @@ class Installer:
         if not cluster_config:
             return None
 
-        # Validate required fields
-        required = ['gpu_type', 'workloads', 'slurm', 'install']
+        # Validate required fields. The platform-specific block (slurm/runai) is
+        # validated separately since Run:ai configs intentionally omit 'slurm'.
+        required = ['gpu_type', 'workloads', 'install']
         if not all(k in cluster_config for k in required):
+            return None
+
+        platform = cluster_config.get('platform', 'slurm')
+        if platform == 'slurm' and 'slurm' not in cluster_config:
             return None
 
         # Check that workloads.installed is a list
@@ -220,6 +226,36 @@ class Installer:
 
         return repo_copy_path
 
+    @staticmethod
+    def _runai_prepull_enabled() -> bool:
+        """Whether to actually submit the Run:ai image-puller job (vs. just print it).
+
+        Controlled by LLMB_RUNAI_PREPULL (default on). Set to 0/false/no to skip
+        submission, e.g. in CI or when warming nodes out of band.
+        """
+        return os.environ.get('LLMB_RUNAI_PREPULL', '1').strip().lower() not in ('0', 'false', 'no')
+
+    @staticmethod
+    def _runai_prepull_node_count() -> Optional[int]:
+        """Node count used to spread the image-puller across the cluster.
+
+        Read from LLMB_RUNAI_PREPULL_NODES. When unset, the helper prints the
+        ready-to-run command instead of submitting (we can't safely guess size).
+        """
+        raw = os.environ.get('LLMB_RUNAI_PREPULL_NODES', '').strip()
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+            return value if value > 0 else None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _build_runai_info(config: InstallConfig) -> dict:
+        """Build the runai_info dict passed to create_cluster_config (mirrors slurm_info)."""
+        return {'runai': config.runai.model_dump()} if config.runai else {}
+
     def _complete_installation(
         self,
         config: InstallConfig,
@@ -245,7 +281,9 @@ class Installer:
                 gpu_type=config.gpu_type,
                 node_architecture=config.node_architecture,
                 venv_type=config.venv_type,
+                platform=config.platform,
                 slurm=config.slurm,
+                runai=config.runai,
                 environment_vars=config.environment_vars,
                 selected_workloads=completed_workloads,  # Only the completed ones
                 workload_selection_mode=config.workload_selection_mode,
@@ -285,6 +323,8 @@ class Installer:
                 install_method=final_config.install_method,
                 image_folder=getattr(final_config, 'image_folder', None),
                 existing_cluster_config=existing_cluster_config,  # For incremental installs
+                platform=final_config.platform,
+                runai_info=self._build_runai_info(final_config),
             )
             print(f"✓ Configuration saved to {final_config.install_path}/cluster_config.yaml")
 
@@ -1744,23 +1784,37 @@ class Installer:
             print("\nNo workloads selected. Exiting.")
             raise SystemExit(EXIT_CANCELLED)
 
-        # Build InstallConfig using existing settings
-        gpu_slurm = slurm_config_dict.get('gpu', {})
-        cpu_slurm = slurm_config_dict.get('cpu', {})
-        slurm_obj = SlurmConfig(
-            account=slurm_config_dict.get('account', ''),
-            gpu_partition=gpu_slurm.get('partition', ''),
-            cpu_partition=cpu_slurm.get('partition', ''),
-            gpu_partition_gres=gpu_slurm.get('gres'),
-            cpu_partition_gres=cpu_slurm.get('gres'),
-        )
+        # Build InstallConfig using existing settings. Slurm and Run:ai are mutually
+        # exclusive; pick the block matching the recorded platform.
+        platform = cluster_config.get('platform', 'slurm')
+        slurm_obj = None
+        runai_obj = None
+        if platform == 'runai':
+            from llmb_install.config.cluster import runai_config_from_environment
+            from llmb_install.config.models import RunAIConfig
+
+            runai_dict = runai_config_from_environment(env_vars)
+            if runai_dict:
+                runai_obj = RunAIConfig.model_validate(runai_dict)
+        else:
+            gpu_slurm = slurm_config_dict.get('gpu', {})
+            cpu_slurm = slurm_config_dict.get('cpu', {})
+            slurm_obj = SlurmConfig(
+                account=slurm_config_dict.get('account', ''),
+                gpu_partition=gpu_slurm.get('partition', ''),
+                cpu_partition=cpu_slurm.get('partition', ''),
+                gpu_partition_gres=gpu_slurm.get('gres'),
+                cpu_partition_gres=cpu_slurm.get('gres'),
+            )
 
         config = InstallConfig(
             install_path=install_path,
             gpu_type=gpu_type,
             node_architecture=node_architecture,
             venv_type=venv_type,
+            platform=platform,
             slurm=slurm_obj,
+            runai=runai_obj,
             environment_vars=env_vars,
             selected_workloads=selected,
             install_method=install_method,
@@ -2235,19 +2289,36 @@ class Installer:
             print(f"  - {image} -> {filename}")
         print("\n")
 
-        # Use image_folder from config
-        effective_image_folder = install_config.image_folder
-
+        # Defined here so the later (partial/final) create_cluster_config calls can
+        # reference them regardless of which platform branch runs below.
         slurm_info = {'slurm': install_config.slurm.model_dump()} if install_config.slurm else {}
+        runai_info = self._build_runai_info(install_config)
 
-        fetch_container_images(
-            required_images,
-            install_config.install_path,
-            install_config.node_architecture,
-            install_config.install_method,
-            slurm_info,
-            effective_image_folder,
-        )
+        if install_config.platform == 'runai':
+            # Run:ai schedules OCI images directly onto Kubernetes nodes; there is no
+            # enroot/sqsh build. Optionally warm every node's containerd cache so the
+            # first benchmark doesn't stall in ImagePullBackOff on the large NeMo image.
+            project_name = install_config.runai.project_name if install_config.runai else None
+            prepull_nodes = self._runai_prepull_node_count()
+            prepull_images_runai(
+                required_images,
+                project_name,
+                num_nodes=prepull_nodes,
+                gpus_per_node=gpus_per_node_for(install_config.gpu_type),
+                submit=self._runai_prepull_enabled(),
+            )
+        else:
+            # Use image_folder from config
+            effective_image_folder = install_config.image_folder
+
+            fetch_container_images(
+                required_images,
+                install_config.install_path,
+                install_config.node_architecture,
+                install_config.install_method,
+                slurm_info,
+                effective_image_folder,
+            )
 
         # Download HuggingFace assets
         hf_token = install_config.environment_vars.get('HF_TOKEN')
@@ -2478,6 +2549,8 @@ class Installer:
                         install_method=install_config.install_method,
                         image_folder=install_config.image_folder,
                         existing_cluster_config=existing_cluster_config,
+                        platform=install_config.platform,
+                        runai_info=runai_info,
                     )
                 except Exception as config_err:
                     self.logger.debug(f"Could not save partial cluster config: {config_err}")
@@ -2518,6 +2591,8 @@ class Installer:
             install_method=install_config.install_method,
             image_folder=install_config.image_folder,
             existing_cluster_config=existing_cluster_config,  # For incremental installs
+            platform=install_config.platform,
+            runai_info=runai_info,
         )
 
         print(f"\nInstallation complete! Workloads have been installed to: {install_config.install_path}")

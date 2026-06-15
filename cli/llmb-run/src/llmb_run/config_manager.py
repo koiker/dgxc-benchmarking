@@ -102,6 +102,7 @@ class ClusterConfig:
     """Resolved cluster configuration for llmb-run."""
 
     schema_version: int
+    platform: str
     gpu_type: str
     llmb_install: str
     llmb_repo: str
@@ -120,11 +121,23 @@ class ClusterConfig:
 
         normalized_config = _normalize_cluster_config(raw_config)
 
-        resolved_targets = resolve_slurm_targets(normalized_config)
-        slurm = SlurmConfig(
-            gpu=SlurmTargetConfig(resolved_targets['gpu']),
-            cpu=SlurmTargetConfig(resolved_targets['cpu']),
-        )
+        # Platform selector. Defaults to 'slurm' for backward compatibility. Non-Slurm
+        # platforms (e.g. 'runai') do not require a 'slurm' section in cluster_config.
+        platform = normalized_config.get('platform', 'slurm')
+        if not isinstance(platform, str) or not platform.strip():
+            raise ValueError("Invalid cluster configuration: 'platform' must be a non-empty string when provided.")
+        platform = platform.strip().lower()
+
+        if platform == 'slurm':
+            resolved_targets = resolve_slurm_targets(normalized_config)
+            slurm = SlurmConfig(
+                gpu=SlurmTargetConfig(resolved_targets['gpu']),
+                cpu=SlurmTargetConfig(resolved_targets['cpu']),
+            )
+        else:
+            # Provide an empty SlurmConfig so launchers that call slurm.env() get {}.
+            _empty: Dict[str, str] = {}
+            slurm = SlurmConfig(gpu=SlurmTargetConfig(dict(_empty)), cpu=SlurmTargetConfig(dict(_empty)))
 
         workloads = _parse_workloads_config(normalized_config)
         install = _parse_install_config(normalized_config)
@@ -143,6 +156,7 @@ class ClusterConfig:
 
         known_top_level_keys = {
             _SCHEMA_VERSION_KEY,
+            'platform',
             'gpu_type',
             'llmb_install',
             'llmb_repo',
@@ -157,6 +171,7 @@ class ClusterConfig:
 
         return cls(
             schema_version=normalized_config[_SCHEMA_VERSION_KEY],
+            platform=platform,
             gpu_type=normalized_config['gpu_type'],
             llmb_install=normalized_config['llmb_install'],
             llmb_repo=normalized_config['llmb_repo'],

@@ -100,6 +100,64 @@ def normalize_cluster_config(config: dict) -> dict:
     return normalized
 
 
+def _build_runai_environment(runai_info: dict) -> Dict[str, str]:
+    """Translate a runai_info dict into the environment vars that launch.sh / llmb-run read.
+
+    These keys mirror the PLATFORM=runai branch in each workload's launch.sh and the
+    Run:ai CLI executor (DGXC_*/RUNAI_* knobs). List-valued fields are space-joined so
+    launch.sh can expand them into repeated --runai_* flags.
+    """
+    runai = runai_info.get('runai', runai_info)
+    env: Dict[str, str] = {
+        'PLATFORM': 'runai',
+        'DGXC_PROJECT_NAME': runai['project_name'],
+        'DGXC_PVC_CLAIM_NAME': runai['pvc_claim_name'],
+        'DGXC_PVC_MOUNT_PATH': runai.get('pvc_mount_path', '/nemo-workspace'),
+        'RUN_CONF_IMAGE': runai['container_image'],
+        'RUNAI_LARGE_SHM': 'true' if runai.get('large_shm', True) else 'false',
+        'RUNAI_RAILS_ON_MASTER': 'true' if runai.get('rails_on_master', True) else 'false',
+    }
+    extended_resources = runai.get('extended_resources') or []
+    if extended_resources:
+        env['RUNAI_EXTENDED_RESOURCES'] = ' '.join(extended_resources)
+    annotations = runai.get('annotations') or []
+    if annotations:
+        env['RUNAI_ANNOTATIONS'] = ' '.join(annotations)
+    if runai.get('node_pools'):
+        env['RUNAI_NODE_POOLS'] = runai['node_pools']
+    return env
+
+
+def runai_config_from_environment(environment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Reverse of _build_runai_environment: recover a runai config dict from env knobs.
+
+    Used for incremental installs where the original RunAIConfig is only persisted
+    inside cluster_config.yaml's environment block. Returns None if the required
+    Run:ai keys are absent.
+    """
+    if not environment or 'DGXC_PROJECT_NAME' not in environment:
+        return None
+
+    def _as_bool(value: Any, default: bool = True) -> bool:
+        if value is None:
+            return default
+        return str(value).strip().lower() in ('1', 'true', 'yes')
+
+    extended = environment.get('RUNAI_EXTENDED_RESOURCES', '')
+    annotations = environment.get('RUNAI_ANNOTATIONS', '')
+    return {
+        'project_name': environment['DGXC_PROJECT_NAME'],
+        'pvc_claim_name': environment.get('DGXC_PVC_CLAIM_NAME', ''),
+        'pvc_mount_path': environment.get('DGXC_PVC_MOUNT_PATH', '/nemo-workspace'),
+        'container_image': environment.get('RUN_CONF_IMAGE', ''),
+        'extended_resources': extended.split() if extended else [],
+        'annotations': annotations.split() if annotations else [],
+        'large_shm': _as_bool(environment.get('RUNAI_LARGE_SHM')),
+        'rails_on_master': _as_bool(environment.get('RUNAI_RAILS_ON_MASTER')),
+        'node_pools': environment.get('RUNAI_NODE_POOLS'),
+    }
+
+
 def create_cluster_config(
     install_path: str,
     root_dir: str,
@@ -113,6 +171,8 @@ def create_cluster_config(
     install_method: str = 'local',
     image_folder: Optional[str] = None,
     existing_cluster_config: Optional[Dict[str, Any]] = None,
+    platform: str = 'slurm',
+    runai_info: Optional[dict] = None,
 ) -> None:
     """Create or update cluster_config.yaml file with all installation configuration.
 
@@ -129,6 +189,9 @@ def create_cluster_config(
         install_method: Installation method ('local' or 'slurm')
         image_folder: Optional path to container image folder
         existing_cluster_config: Optional existing config for incremental updates
+        platform: Launch platform ('slurm' or 'runai'); controls whether a slurm
+            block is emitted and whether Run:ai env knobs are injected.
+        runai_info: Run:ai configuration dictionary (required when platform='runai')
     """
     # If updating, merge with existing workloads
     if existing_cluster_config:
@@ -187,15 +250,28 @@ def create_cluster_config(
         if image_folder:
             install_section['image_folder'] = image_folder
 
-    cluster_config = {
+    # Run:ai injects PLATFORM/DGXC_*/RUNAI_* knobs into the environment block so that
+    # each workload's launch.sh PLATFORM=runai branch and llmb-run pick them up. User
+    # environment_vars take precedence over the derived defaults.
+    environment = dict(env_vars)
+    if platform == 'runai' and runai_info:
+        environment = {**_build_runai_environment(runai_info), **environment}
+
+    cluster_config: Dict[str, Any] = {
         'schema_version': 2,
+        'platform': platform,
         'llmb_repo': root_dir,
         'llmb_install': install_path,
         'gpu_type': gpu_type,
         **({'cluster_name': cluster_name} if cluster_name else {}),
         'install': install_section,
-        'environment': env_vars,
-        'slurm': {
+        'environment': environment,
+    }
+
+    # Only the Slurm platform emits a slurm block; Run:ai is fully described by the
+    # environment knobs above (and config_manager treats slurm as optional then).
+    if platform == 'slurm':
+        cluster_config['slurm'] = {
             'account': slurm_info['slurm']['account'],
             'gpu': {
                 'partition': slurm_info['slurm']['gpu_partition'],
@@ -205,9 +281,9 @@ def create_cluster_config(
                 'partition': slurm_info['slurm']['cpu_partition'],
                 'gres': slurm_info['slurm'].get('cpu_partition_gres'),
             },
-        },
-        'workloads': {'installed': all_workloads, 'config': merged_workload_venvs},
-    }
+        }
+
+    cluster_config['workloads'] = {'installed': all_workloads, 'config': merged_workload_venvs}
 
     # Write the cluster config file
     config_path = os.path.join(install_path, "cluster_config.yaml")
