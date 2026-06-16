@@ -72,15 +72,6 @@ GPU_METRICS_ENABLED=${GPU_METRICS_ENABLED,,}
 ENABLE_VBOOST=${ENABLE_VBOOST:-false}
 ENABLE_VBOOST=${ENABLE_VBOOST,,}
 
-# Handle additional SLURM parameters from environment variable
-ADDITIONAL_SLURM_PARAMS=${ADDITIONAL_SLURM_PARAMS:-""}
-
-# Add additional SLURM parameters if provided
-SLURM_ARGS=""
-if [ -n "$ADDITIONAL_SLURM_PARAMS" ]; then
-    SLURM_ARGS="--additional_slurm_params ${ADDITIONAL_SLURM_PARAMS}"
-fi
-
 CONTAINER_MOUNTS=""
 if [[ -n ${RUN_CONF_MOUNTS:-""} ]]; then
     if [[ -n ${CONTAINER_MOUNTS} ]]; then
@@ -182,6 +173,13 @@ if [[ $ENABLE_VBOOST == true ]]; then
     CONFIG_OVERRIDES+=" --enable_vboost true "
 fi
 
+# Platform selection (slurm | runai | dgxc) -> PLATFORM_ARGS array.
+_LLMB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+while [[ "$_LLMB_DIR" != "/" && ! -f "$_LLMB_DIR/common/platform_args.sh" ]]; do
+    _LLMB_DIR="$(dirname "$_LLMB_DIR")"
+done
+source "$_LLMB_DIR/common/platform_args.sh"
+
 # run command
 pushd $LLMB_WORKLOAD/Megatron-Bridge
 python3 scripts/performance/setup_experiment.py \
@@ -198,11 +196,9 @@ python3 scripts/performance/setup_experiment.py \
     --data squad_packed \
     --dataset_root $LLMB_WORKLOAD/checkpoint_and_dataset/datasets \
     ${CONFIG_OVERRIDES} \
-    --account $SBATCH_ACCOUNT \
-    --partition $SBATCH_PARTITION \
     --log_dir $NEMORUN_HOME \
     --time_limit $TIME_LIMIT \
     --max_steps $MAX_STEPS \
-    $SLURM_ARGS
+    "${PLATFORM_ARGS[@]}"
 
 popd

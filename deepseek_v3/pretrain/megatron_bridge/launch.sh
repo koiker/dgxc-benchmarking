@@ -77,15 +77,6 @@ ENABLE_VBOOST=${ENABLE_VBOOST,,}
 TIME_LIMIT=${TIME_LIMIT:-"01:30:00"}
 MAX_STEPS=${MAX_STEPS:-50}
 
-# Handle additional SLURM parameters from environment variable
-ADDITIONAL_SLURM_PARAMS=${ADDITIONAL_SLURM_PARAMS:-""}
-
-# Add additional SLURM parameters if provided
-SLURM_ARGS=""
-if [ -n "$ADDITIONAL_SLURM_PARAMS" ]; then
-    SLURM_ARGS="--additional_slurm_params ${ADDITIONAL_SLURM_PARAMS}"
-fi
-
 export HF_HOME="$LLMB_INSTALL/.cache/huggingface"
 CONTAINER_MOUNTS="$HF_HOME"
 if [[ -n ${RUN_CONF_MOUNTS:-""} ]]; then
@@ -163,6 +154,13 @@ if [[ $FW_VERSION == "26.04.00" ]]; then
     CONFIG_OVERRIDES+=" --packager none "
 fi
 
+# Platform selection (slurm | runai | dgxc) -> PLATFORM_ARGS array.
+_LLMB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+while [[ "$_LLMB_DIR" != "/" && ! -f "$_LLMB_DIR/common/platform_args.sh" ]]; do
+    _LLMB_DIR="$(dirname "$_LLMB_DIR")"
+done
+source "$_LLMB_DIR/common/platform_args.sh"
+
 # run command
 pushd $LLMB_WORKLOAD/Megatron-Bridge
 if [[ $FW_VERSION == "26.04.00" ]] || [[ $FW_VERSION == "26.02.01" ]]; then
@@ -176,12 +174,10 @@ if [[ $FW_VERSION == "26.04.00" ]] || [[ $FW_VERSION == "26.02.01" ]]; then
         --model_family_name deepseek \
         --model_recipe_name deepseek_v3 \
         ${CONFIG_OVERRIDES} \
-        --account $SBATCH_ACCOUNT \
-        --partition $SBATCH_PARTITION \
         --log_dir $NEMORUN_HOME \
         --time_limit $TIME_LIMIT \
         --max_steps $MAX_STEPS \
-        $SLURM_ARGS
+        "${PLATFORM_ARGS[@]}"
 elif [[ $FW_VERSION == "25.09.00" ]]; then
     python3 scripts/performance/setup_experiment.py \
         --container_image $IMAGE \
@@ -192,11 +188,9 @@ elif [[ $FW_VERSION == "25.09.00" ]]; then
         --model_name deepseek \
         --model_size v3 \
         ${CONFIG_OVERRIDES} \
-        --account $SBATCH_ACCOUNT \
-        --partition $SBATCH_PARTITION \
         --log_dir $NEMORUN_HOME \
         --time_limit $TIME_LIMIT \
         --max_steps $MAX_STEPS \
-        $SLURM_ARGS
+        "${PLATFORM_ARGS[@]}"
 fi
 popd

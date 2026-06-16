@@ -43,7 +43,7 @@ Each benchmark runs 50 steps; iterations 35–44 are averaged to skip warmup (in
 
 ## Viewing results with `llmb-run jobs`
 
-Each `llmb-run jobs` command refreshes Slurm state and parses the training log for any job that has finished (succeeded, failed, or cancelled) — there is no background updater. Run from `$LLMB_INSTALL`:
+Each `llmb-run jobs` command refreshes scheduler state (Slurm via `sacct`, or Run:ai via the `runai` CLI) and parses the training log for any job that has finished (succeeded, failed, or cancelled) — there is no background updater. Run from `$LLMB_INSTALL`:
 
 ```bash
 # List all jobs you've submitted, with parsed metrics
@@ -59,7 +59,7 @@ llmb-run jobs log <job_id>
 Example `llmb-run jobs` output (illustrative values):
 
 ```text
-  Workload              DType  Scale   Job ID  Profile  Submit Time       Slurm Status  Elapsed   s/iter  TFLOPS/GPU
+  Workload              DType  Scale   Job ID  Profile  Submit Time       Status        Elapsed   s/iter  TFLOPS/GPU
   pretrain_example_8b   bf16     128  1234567  No       2026-04-17 13:42  COMPLETED     00:12:34    4.21     1234.56
   pretrain_example_70b  fp8      256  1234589  No       2026-04-17 14:05  RUNNING       00:03:11
 ```
@@ -191,6 +191,12 @@ JOB_TOTAL_GPUS=<number> GPU_TYPE=<type> [DTYPE=<precision>] [ADDITIONAL_SLURM_PA
   - `h100` - NVIDIA H100 GPUs
 
 **Optional:**
+
+- `PLATFORM`: Target scheduler (default: `slurm`). Supported: `slurm`, `runai`, `dgxc`.
+
+  - `slurm` (default): requires `SBATCH_ACCOUNT` and `SBATCH_PARTITION`.
+  - `runai`: submits via the `runai` CLI after `runai login` (no Application creds). Requires `DGXC_PROJECT_NAME` and `DGXC_PVC_CLAIM_NAME`; optional `DGXC_PVC_MOUNT_PATH`, `RUNAI_EXTENDED_RESOURCES`, `RUNAI_ANNOTATIONS`, `RUNAI_NODE_POOLS`, `RUNAI_LARGE_SHM`, `RUNAI_RAILS_ON_MASTER`. See the [Run:ai platform guide](../../cli/llmb-install/docs/headless-installation.md#platform-selection-slurm-vs-runai).
+  - `dgxc`: DGX Cloud REST API (`DGXC_BASE_URL`, `DGXC_APP_ID`, `DGXC_APP_SECRET`, `DGXC_PROJECT_NAME`, `DGXC_PVC_CLAIM_NAME`).
 
 - `ADDITIONAL_SLURM_PARAMS`: Extra `sbatch` flags (e.g. `--nodelist`, `--reservation`), semicolon-separated
   - Example: `"nodelist=node001,node002;reservation=my_reservation;exclusive"`

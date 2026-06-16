@@ -68,15 +68,6 @@ PROFILE_STOP_STEP=${PROFILE_STOP_STEP:-50}
 
 JOB_TOTAL_GPUS=${JOB_TOTAL_GPUS:?JOB_TOTAL_GPUS is a required variable.}
 
-# Handle additional SLURM parameters from environment variable
-ADDITIONAL_SLURM_PARAMS=${ADDITIONAL_SLURM_PARAMS:-""}
-
-# Add additional SLURM parameters if provided
-SLURM_ARGS=""
-if [ -n "$ADDITIONAL_SLURM_PARAMS" ]; then
-    SLURM_ARGS="--additional_slurm_params ${ADDITIONAL_SLURM_PARAMS}"
-fi
-
 CONTAINER_MOUNTS=""
 export HF_HOME="$LLMB_INSTALL/.cache/huggingface"
 CONTAINER_MOUNTS="$HF_HOME"
@@ -125,11 +116,6 @@ if [[ -n ${MBS-} ]]; then
 fi
 if [[ -n ${GBS-} ]]; then
     CONFIG_OVERRIDES+="-gb $GBS "
-fi
-
-if [[ $CLUSTER_TYPE != "slurm" ]]; then
-    echo "Only SLURM is supported for this workload"
-    exit 1
 fi
 
 # Checkpoint configuration
@@ -202,6 +188,13 @@ else
     GPUS_PER_NODE=8
 fi
 
+# Platform selection (slurm | runai | dgxc) -> PLATFORM_ARGS array.
+_LLMB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+while [[ "$_LLMB_DIR" != "/" && ! -f "$_LLMB_DIR/common/platform_args.sh" ]]; do
+    _LLMB_DIR="$(dirname "$_LLMB_DIR")"
+done
+source "$_LLMB_DIR/common/platform_args.sh"
+
 # run command
 pushd $LLMB_WORKLOAD/Megatron-Bridge
 
@@ -217,9 +210,7 @@ python scripts/performance/setup_experiment.py \
     --enable_vboost $ENABLE_VBOOST \
     --offline \
     $CONFIG_OVERRIDES \
-    --account $SBATCH_ACCOUNT \
-    --partition $SBATCH_PARTITION \
     --log_dir $NEMORUN_HOME \
     --time_limit $TIME_LIMIT \
-    $SLURM_ARGS
+    "${PLATFORM_ARGS[@]}"
 popd

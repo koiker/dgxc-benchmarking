@@ -168,9 +168,11 @@ export LLMB_RUNAI_PREPULL_NODES=<number_of_nodes>   # enable auto-submit of a pu
 export LLMB_RUNAI_PREPULL=0                          # set 0 to print the command instead of submitting
 ```
 
-> **Recipe support**: the Run:ai launch path is currently wired for the
-> `pretrain_nemotron_3` and `pretrain_nemotron-h` recipes. Other recipes install
-> normally but their `launch.sh` is still Slurm-only.
+> **Recipe support**: the Run:ai launch path is wired for all Megatron-Bridge
+> recipes (`setup_experiment.py`): Nemotron 3, Nemotron-H, Llama 3.1, Llama 3
+> finetune, Qwen3, Kimi-K2, GPT-OSS, DeepSeek V3. Recipes built on other launchers
+> (NeMo perf scripts: Nemotron-4, Grok-1; TorchTitan; inference) install normally
+> but their `launch.sh` is still Slurm-only.
 
 ### Important: Fresh Installations Only
 
