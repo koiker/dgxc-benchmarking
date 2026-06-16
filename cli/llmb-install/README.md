@@ -191,6 +191,21 @@ The installer automatically detects and validates:
 - **Partitions**: Available partitions (via `sinfo`)
 - **GPU Resources**: GPU counts per partition (via GRES)
 
+### Run:ai Configuration
+
+For NVIDIA Run:ai (Kubernetes / DGX Cloud) clusters, set the top-level `platform: runai`
+key and provide a `runai:` block instead of `slurm:`. This path is **headless-first**
+(use `--play`); see the [Headless Installation Guide](docs/headless-installation.md#platform-selection-slurm-vs-runai)
+and the ready-to-edit [`example_config_runai.yaml`](example_config_runai.yaml).
+
+Key points:
+
+- Authentication uses `runai login` (SSO) — **no** Run:ai Application (`app_id`/`app_secret`).
+- `install_method` is `local`: install-time HF/tool prefetch runs on the login node, and
+  Run:ai pulls the container image directly (no enroot/`.sqsh` build).
+- The `runai:` block carries `project_name`, `pvc_claim_name`, `pvc_mount_path`,
+  `container_image`, and the RoCE/GDR `extended_resources` + Multus `annotations`.
+
 ### Node Architecture
 
 - **x86_64**: Standard Intel/AMD processors
@@ -206,6 +221,11 @@ Which method to use to download the large container images and datasets. Workloa
 - **SLURM**: Downloads submitted as jobs (recommended for clusters)
   - **Note:** Currently this is sequential srun jobs.
   - **Important:** SLURM installation method is not available when running the installer within a SLURM job
+- **Run:ai (`platform: runai`)**: Always uses the `local` method. Run:ai pulls the
+  container image directly from the registry, so there is no enroot/`.sqsh` download
+  step; only HF assets and tools are fetched locally on the login node. See the
+  optional [image pre-pull](docs/headless-installation.md#runai-configuration-file-format)
+  to warm node caches.
 
 **SLURM Job Detection**: The installer automatically detects if it's running within a SLURM job (via `SLURM_JOB_ID` environment variable). When detected:
 
@@ -448,8 +468,12 @@ The installer recognizes the following environment variables to control behavior
 | `LLMB_DISABLE_GIT_CACHE`      | Disable git repository caching                            | `1`, `true`, or `yes` to disable |
 | `LLMB_USE_PIP_FALLBACK`       | Use standard pip instead of uv pip in uv environments     | `1`, `true`, or `yes` to enable  |
 | `LLMB_DISABLE_MANAGED_PYTHON` | Disable enforced managed python usage for UV environments | `1`, `true`, or `yes` to disable |
+| `LLMB_RUNAI_PREPULL_NODES`    | (Run:ai) Number of nodes for the optional image pre-pull job | integer node count |
+| `LLMB_RUNAI_PREPULL`          | (Run:ai) Submit the pre-pull job vs. print the command    | `0` to print instead of submit   |
 
 **Resume Control**: Set `LLMB_DISABLE_RESUME=1` to prevent automatic resume detection and always start fresh installations.
+
+**Run:ai Image Pre-pull**: On `platform: runai`, set `LLMB_RUNAI_PREPULL_NODES=<n>` to warm every node's containerd cache with the benchmark image before the first run (avoids `ImagePullBackOff` on the large NeMo image). Set `LLMB_RUNAI_PREPULL=0` to print the puller command instead of submitting it.
 
 **Git Caching**: Set `LLMB_DISABLE_GIT_CACHE=1` to skip local git cache and clone repositories directly from remote sources.
 

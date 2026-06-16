@@ -36,6 +36,11 @@ Depending on your cluster's job scheduler, ensure the following are met:
   - [Enroot](https://github.com/NVIDIA/enroot/) 4.0.0 or newer
     - Enroot [extra hooks](https://github.com/NVIDIA/enroot/tree/main/conf/hooks/extra) (e.g. `50-slurm-pytorch.sh`) must be installed under `/etc/enroot/hooks.d/` — required for PyTorch distributed bootstrap.
   - [Pyxis](https://github.com/NVIDIA/pyxis)
+- **Run:ai Clusters (Kubernetes / DGX Cloud)**
+  - NVIDIA Run:ai with the `runai` CLI (v2) installed on the login node, authenticated via `runai login` (SSO) — no Run:ai Application (`app_id`/`app_secret`) required
+  - A shared workspace PVC accessible from the compute nodes (no enroot/pyxis; Run:ai pulls the container image directly)
+  - RoCE/GDR rails exposed as Kubernetes extended resources + Multus network attachments for multi-node jobs
+  - Headless install via `platform: runai`; see the [Run:ai installation guide](cli/llmb-install/docs/headless-installation.md#platform-selection-slurm-vs-runai). Currently wired for the Nemotron 3 and Nemotron-H recipes.
 
 ## Quick Start Guide
 

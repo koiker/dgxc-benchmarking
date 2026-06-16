@@ -44,7 +44,7 @@ Each benchmark runs 50 steps; iterations 35–44 are averaged to skip warmup (in
 
 ## Viewing results with `llmb-run jobs`
 
-Each `llmb-run jobs` command refreshes Slurm state and parses the training log for any job that has finished (succeeded, failed, or cancelled) — there is no background updater. Run from `$LLMB_INSTALL`:
+Each `llmb-run jobs` command refreshes scheduler state (Slurm via `sacct`, or Run:ai via the `runai` CLI) and parses the training log for any job that has finished (succeeded, failed, or cancelled) — there is no background updater. Run from `$LLMB_INSTALL`:
 
 ```bash
 # List all jobs you've submitted, with parsed metrics
@@ -60,7 +60,7 @@ llmb-run jobs log <job_id>
 Example `llmb-run jobs` output (illustrative values):
 
 ```text
-  Workload              DType  Scale   Job ID  Profile  Submit Time       Slurm Status  Elapsed   s/iter  TFLOPS/GPU
+  Workload              DType  Scale   Job ID  Profile  Submit Time       Status        Elapsed   s/iter  TFLOPS/GPU
   pretrain_example_8b   bf16     128  1234567  No       2026-04-17 13:42  COMPLETED     00:12:34    4.21     1234.56
   pretrain_example_70b  fp8      256  1234589  No       2026-04-17 14:05  RUNNING       00:03:11
 ```
@@ -185,7 +185,7 @@ Alternatively, you can run training directly using the launch script. This metho
 ### Command Template
 
 ```shell
-JOB_TOTAL_GPUS=<number> GPU_TYPE=<type> [DTYPE=<precision>] [MODEL_SIZE=<size>] [ADDITIONAL_SLURM_PARAMS=<params>] ./launch.sh
+JOB_TOTAL_GPUS=<number> GPU_TYPE=<type> [DTYPE=<precision>] [MODEL_SIZE=<size>] [PLATFORM=<scheduler>] [ADDITIONAL_SLURM_PARAMS=<params>] ./launch.sh
 ```
 
 ### Environment Variables
@@ -214,6 +214,16 @@ JOB_TOTAL_GPUS=<number> GPU_TYPE=<type> [DTYPE=<precision>] [MODEL_SIZE=<size>] 
 
   - Example: `"nodelist=node001,node002;reservation=my_reservation;exclusive"`
 
+- `PLATFORM`: Target scheduler (default: `slurm`). Supported: `slurm`, `runai`, `dgxc`.
+
+  - `slurm` (default): requires `SBATCH_ACCOUNT` and `SBATCH_PARTITION`.
+  - `runai`: submits via the `runai` CLI (requires a prior `runai login`; no Application creds).
+    Requires `DGXC_PROJECT_NAME` and `DGXC_PVC_CLAIM_NAME` (and optionally `DGXC_PVC_MOUNT_PATH`,
+    `RUNAI_EXTENDED_RESOURCES`, `RUNAI_ANNOTATIONS`, `RUNAI_NODE_POOLS`, `RUNAI_LARGE_SHM`,
+    `RUNAI_RAILS_ON_MASTER`). RoCE rails/annotations are space-separated lists.
+  - `dgxc`: submits via the DGX Cloud REST API (requires `DGXC_BASE_URL`, `DGXC_APP_ID`,
+    `DGXC_APP_SECRET`, `DGXC_PROJECT_NAME`, `DGXC_PVC_CLAIM_NAME`).
+
 **Note:** This workload only supports:
 
 - FP8 precision
@@ -225,6 +235,18 @@ Train Nemotron-H 56B with FP8 precision on 128 GB300 GPUs:
 
 ```shell
 JOB_TOTAL_GPUS=128 GPU_TYPE=GB300 ./launch.sh
+```
+
+Train Nemotron-H 56B with FP8 on a Run:ai cluster (after `runai login`):
+
+```shell
+PLATFORM=runai \
+  DGXC_PROJECT_NAME=nccl-benchmarking \
+  DGXC_PVC_CLAIM_NAME=nemo-workspace \
+  DGXC_PVC_MOUNT_PATH=/nemo-workspace \
+  RUNAI_EXTENDED_RESOURCES="nvidia.com/r0-p0=1 nvidia.com/r1-p0=1" \
+  RUNAI_ANNOTATIONS="k8s.v1.cni.cncf.io/networks=default/r0-p0,default/r1-p0" \
+  JOB_TOTAL_GPUS=32 GPU_TYPE=b300 ./launch.sh
 ```
 
 Train Nemotron-H 56B with FP8 precision on 128 GB200 GPUs:

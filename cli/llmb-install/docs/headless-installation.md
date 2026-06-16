@@ -101,6 +101,77 @@ environment_vars:                  # Optional environment variables
 
 **After installation**: The installer creates `cluster_config.yaml` in `$LLMB_INSTALL/` which `llmb-run` uses for job submission.
 
+### Platform Selection (Slurm vs Run:ai)
+
+The optional top-level `platform` key selects the cluster scheduler. When omitted it
+defaults to `slurm`, so existing configs are unaffected.
+
+| `platform`        | Scheduler                          | Config block | Credentials                              |
+| ----------------- | ---------------------------------- | ------------ | ---------------------------------------- |
+| `slurm` (default) | Slurm + enroot/pyxis               | `slurm:`     | Slurm account/partition                  |
+| `runai`           | NVIDIA Run:ai (Kubernetes) via CLI | `runai:`     | `runai login` (SSO) — no Application creds |
+
+#### Run:ai Configuration File Format
+
+On Run:ai the `slurm:` block is replaced by a `runai:` block, and
+`install_method` is `local` (Run:ai pulls the OCI image directly, so there is no
+enroot/`.sqsh` build):
+
+```yaml
+venv_type: venv
+install_path: /shared/nemo-workspace/llmb-runai/install
+gpu_type: b300                       # 'h100', 'b200', 'b300', 'gb200', 'gb300'
+node_architecture: x86_64
+
+platform: runai
+install_method: local                # install-time HF/tool prefetch runs on the login node
+
+runai:
+  project_name: nccl-benchmarking    # Run:ai project (namespace) to submit into
+  pvc_claim_name: nemo-workspace     # shared workspace PVC
+  pvc_mount_path: /shared/nemo-workspace
+  container_image: nvcr.io/nvidia/nemo:26.04.00
+  extended_resources:                # RoCE/GDR rails as k8s extended resources (one per rail)
+    - nvidia.com/r0-p0=1
+    - nvidia.com/r1-p0=1
+  annotations:                       # Multus network annotation(s)
+    - k8s.v1.cni.cncf.io/networks=default/r0-p0,default/r1-p0
+  large_shm: true
+  rails_on_master: true
+
+selected_workloads:
+  - pretrain_nemotron_3
+
+environment_vars:
+  HF_TOKEN: ""                       # only needed for gated repos / rate-limit relief
+```
+
+A complete, commented template ships at
+[`example_config_runai.yaml`](../example_config_runai.yaml):
+
+```bash
+llmb-install --play example_config_runai.yaml
+```
+
+**Prerequisites for `platform: runai`:**
+
+- Run `runai login` on the install/login node first (CLI v2). No Run:ai
+  Application (`app_id`/`app_secret`) is required — submission works like `sbatch`.
+- The workspace PVC (`pvc_claim_name`) must be mountable at `pvc_mount_path` on the nodes.
+
+**Optional image pre-pull**: to warm every node's containerd cache before the
+first benchmark (avoids `ImagePullBackOff` on the large NeMo image), set these
+before `--play`:
+
+```bash
+export LLMB_RUNAI_PREPULL_NODES=<number_of_nodes>   # enable auto-submit of a puller job
+export LLMB_RUNAI_PREPULL=0                          # set 0 to print the command instead of submitting
+```
+
+> **Recipe support**: the Run:ai launch path is currently wired for the
+> `pretrain_nemotron_3` and `pretrain_nemotron-h` recipes. Other recipes install
+> normally but their `launch.sh` is still Slurm-only.
+
 ### Important: Fresh Installations Only
 
 Play and express modes **only work with new, empty directories**. They cannot add workloads to existing installations.
@@ -247,11 +318,11 @@ The installer validates configuration files before installation:
 - Avoid committing to version control (use templating/secrets management)
 - Consider environment variable substitution for secrets
 
-**Portability**: Configuration files are cluster-specific (SLURM accounts/partitions)
+**Portability**: Configuration files are cluster-specific (Slurm accounts/partitions, or Run:ai project/PVC/rails)
 
 - Cannot directly share configs across different clusters
-- Template configs and customize SLURM settings per cluster
-- Non-SLURM settings (workloads, gpu_type) are portable
+- Template configs and customize the `slurm:`/`runai:` block per cluster
+- Scheduler-independent settings (workloads, gpu_type) are portable
 
 ## Additional Resources
 

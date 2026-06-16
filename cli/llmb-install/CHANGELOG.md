@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project uses [PEP 440](https://www.python.org/dev/peps/pep-0440/) versioning with semantic versioning semantics:
 **MAJOR.MINOR.PATCH** for feature parity with [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- NVIDIA Run:ai platform support for headless (`--play`) installs via a top-level `platform: runai` key and a `runai:` config block (project, PVC claim/mount, container image, RoCE/GDR extended resources, Multus annotations). Generates a `platform: runai` `cluster_config.yaml` for `llmb-run`. See `example_config_runai.yaml`.
+- Optional Run:ai image pre-pull helper (`LLMB_RUNAI_PREPULL_NODES`, `LLMB_RUNAI_PREPULL`) to warm node containerd caches before the first benchmark.
+
+### Notes
+
+- On `platform: runai`, installation uses the `local` method: HF assets/tools are prefetched on the login node and Run:ai pulls the container image directly (no enroot/`.sqsh` build). Authentication is `runai login` (SSO) — no Run:ai Application credentials.
+
 ## [1.9.1] - 2026-05-04
 
 ### Fixed

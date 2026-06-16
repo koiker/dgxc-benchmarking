@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- NVIDIA Run:ai platform support (`platform: runai` in `cluster_config.yaml`). Job submission goes through the `runai` CLI (SSO `runai login`, no Application `app_id`/`app_secret`), with a `runai:` config block (project, PVC, container image, RoCE/GDR extended resources, Multus annotations).
+- `llmb-run jobs` is now platform-aware: Run:ai status is queried via `runai training pytorch list/describe` (Slurm still uses `sacct`), and Run:ai per-rank/master logs are discovered for `jobs log`/`show`.
+- Performance parser fallback for the Megatron-Bridge `Step Time` log format.
+
+### Changed
+
+- Job history schema migrated to v2 (additive `platform` and `platform_job_name` columns; older databases are upgraded in place).
+- `jobs` table/help text de-Slurm-ified ("Status" instead of "Slurm Status") to read consistently across schedulers.
+
 ## [1.14.4] - 2026-05-15
 
 ### Changed
