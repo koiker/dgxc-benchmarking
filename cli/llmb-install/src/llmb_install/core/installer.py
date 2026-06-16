@@ -2487,6 +2487,18 @@ class Installer:
                             print(f"Warning: No dependencies found for workload group containing {first_workload_key}")
                             continue
 
+                        # Run:ai uses KubeflowExecutor which requires the `kubernetes`
+                        # Python package.  Inject it so recipes don't each need to
+                        # declare it — the platform choice is an install-time concern.
+                        if install_config.platform == 'runai':
+                            pip_deps = dependencies.setdefault('pip', [])
+                            if not any(
+                                (isinstance(p, str) and p.startswith('kubernetes'))
+                                or (isinstance(p, dict) and p.get('package') == 'kubernetes')
+                                for p in pip_deps
+                            ):
+                                pip_deps.append('kubernetes')
+
                         # 2. For each workload, create its folder and clone any repos that need to be local.
                         # Each workload resolves its own deps for cloning, since clone-only
                         # deps are excluded from the grouping hash and may differ per workload.
