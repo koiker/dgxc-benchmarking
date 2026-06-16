@@ -127,8 +127,8 @@ platform: runai
 install_method: local                # install-time HF/tool prefetch runs on the login node
 
 runai:
-  project_name: nccl-benchmarking    # Run:ai project (namespace) to submit into
-  pvc_claim_name: nemo-workspace     # shared workspace PVC
+  project_name: my-benchmarking      # Run:ai project (namespace) to submit into
+  pvc_claim_name: my-workspace       # shared workspace PVC
   pvc_mount_path: /shared/nemo-workspace
   container_image: nvcr.io/nvidia/nemo:26.04.00
   extended_resources:                # RoCE/GDR rails as k8s extended resources (one per rail)

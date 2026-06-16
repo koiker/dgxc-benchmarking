@@ -41,19 +41,20 @@
 #   export LLMB_RUNAI_PREPULL=0                          # to print the command instead of submitting
 
 venv_type: venv
-install_path: /cm/shared/nemo-workspace/llmb-runai/install
-gpu_type: b300
+install_path: /shared/llmb-runai/install          # Adjust to your shared PVC mount
+gpu_type: b300                                    # b300, b200, gb200, gb300, h100
 node_architecture: x86_64
 
 platform: runai
 install_method: local
 
 runai:
-  project_name: nccl-benchmarking
-  pvc_claim_name: nemo-workspace
-  pvc_mount_path: /cm/shared/nemo-workspace
+  project_name: my-benchmarking                   # Your Run:ai project name
+  pvc_claim_name: my-workspace                    # PVC claim backing the shared filesystem
+  pvc_mount_path: /shared                         # Where the PVC is mounted in containers
   container_image: nvcr.io/nvidia/nemo:26.04.00
   # RoCE/GDR rails as Kubernetes extended resources (one per rail).
+  # The number of rails depends on the NIC topology; 8 rails shown for a B300 NVL72.
   extended_resources:
     - nvidia.com/r0-p0=1
     - nvidia.com/r1-p0=1
@@ -68,6 +69,7 @@ runai:
     - k8s.v1.cni.cncf.io/networks=default/r0-p0,default/r1-p0,default/r2-p0,default/r3-p0,default/r4-p0,default/r5-p0,default/r6-p0,default/r7-p0
   large_shm: true
   rails_on_master: true
+  # node_pools: "my-pool"                         # Optional: restrict to a specific node pool
 
 selected_workloads:
   - pretrain_nemotron_3
