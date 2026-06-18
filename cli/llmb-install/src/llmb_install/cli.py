@@ -115,6 +115,11 @@ Examples:
   llmb-install express --workloads all                # Prompt for install path
   llmb-install express /work --workloads pretrain_nemotron-h,pretrain_llama3.1  # Fully specified
   llmb-install -d express /work --workloads all       # Dev mode, no repo copy
+
+  # Headless incremental add: if the install path already has an installation,
+  # express adds the requested workloads (reusing locked settings + existing
+  # llmb_repo/venvs) instead of exiting. Useful for CI/automation.
+  llmb-install express --install-path /work --workloads pretrain_gpt_oss
         """,
     )
 

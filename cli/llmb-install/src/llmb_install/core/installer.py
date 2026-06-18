@@ -966,6 +966,21 @@ class Installer:
                 print("\nNo workloads selected. Exiting.")
                 raise SystemExit(EXIT_CANCELLED)
 
+            # Incremental add to an existing installation: skip confirmation and
+            # reuse existing venvs/cluster_config (mirrors the interactive flow).
+            if getattr(config, '_is_incremental', False):
+                if getattr(args, 'image_folder', None) is not None:
+                    config.image_folder = args.image_folder
+                filtered_workloads = self._prepare_workloads(config.gpu_type, config.selected_workloads)
+                self._perform_installation(
+                    config,
+                    filtered_workloads,
+                    is_resume=False,
+                    existing_workload_venvs=getattr(config, '_existing_venvs', {}),
+                    existing_cluster_config=getattr(config, '_existing_cluster_config', None),
+                )
+                return
+
             # Show configuration summary and get confirmation
             if self._confirm_configuration(config):
                 break  # User confirmed, proceed with installation
@@ -1666,6 +1681,7 @@ class Installer:
         install_path: str,
         cluster_config: Dict[str, Any],
         args: Optional[argparse.Namespace] = None,
+        preselected_workloads: Optional[List[str]] = None,
     ) -> tuple[Optional[InstallConfig], Dict[str, str]]:
         """Collect configuration for incremental install - workload selection only.
 
@@ -1769,20 +1785,43 @@ class Installer:
 
         print(f"Available workloads to add ({len(available_workloads)}):")
 
-        try:
-            selected, _ = prompt_workload_selection(
-                ui,
-                available_workloads,
-                show_install_all=True,  # Allow "Install All Available"
-                allow_empty=False,
-            )
-        except KeyboardInterrupt:
-            print("\n\nInstallation cancelled by user.")
-            raise SystemExit(EXIT_CANCELLED) from None
+        if preselected_workloads is not None:
+            # Headless / express-incremental: resolve the requested workloads against
+            # what is actually available to add (GPU-filtered, not already installed)
+            # instead of prompting. 'all' adds everything available.
+            requested = [w.strip() for w in preselected_workloads if w and w.strip()]
+            if len(requested) == 1 and requested[0].lower() == 'all':
+                selected = list(available_workloads.keys())
+            else:
+                selected = []
+                already = [w for w in requested if w in installed_workloads]
+                unknown = [w for w in requested if w not in available_workloads and w not in installed_workloads]
+                selected = [w for w in requested if w in available_workloads]
+                if already:
+                    print(f"  Already installed (skipping): {', '.join(already)}")
+                if unknown:
+                    print(f"\nError: workload(s) not available to add: {', '.join(unknown)}")
+                    print(f"Available to add: {', '.join(sorted(available_workloads.keys()))}")
+                    raise SystemExit(EXIT_ERROR)
+            if not selected:
+                print("\nNo new workloads to add. Exiting.")
+                raise SystemExit(EXIT_CANCELLED)
+            print(f"  Selected to add: {', '.join(selected)}")
+        else:
+            try:
+                selected, _ = prompt_workload_selection(
+                    ui,
+                    available_workloads,
+                    show_install_all=True,  # Allow "Install All Available"
+                    allow_empty=False,
+                )
+            except KeyboardInterrupt:
+                print("\n\nInstallation cancelled by user.")
+                raise SystemExit(EXIT_CANCELLED) from None
 
-        if not selected:
-            print("\nNo workloads selected. Exiting.")
-            raise SystemExit(EXIT_CANCELLED)
+            if not selected:
+                print("\nNo workloads selected. Exiting.")
+                raise SystemExit(EXIT_CANCELLED)
 
         # Build InstallConfig using existing settings. Slurm and Run:ai are mutually
         # exclusive; pick the block matching the recorded platform.
@@ -1828,6 +1867,39 @@ class Installer:
             config.image_folder = image_folder
 
         return (config, existing_workload_venvs)
+
+    def _resolve_express_workload_request(
+        self, args: argparse.Namespace, gpu_type: Optional[str]
+    ) -> Optional[List[str]]:
+        """Resolve the requested workloads for an express incremental add.
+
+        Returns a list of workload names from --workloads (comma-separated, or the
+        sentinel 'all'), or from --exemplar (exemplar.yaml for this GPU type).
+        Returns None when no selection flag was given, so the incremental collector
+        falls back to the interactive checkbox (useful when run in a real terminal).
+
+        Args:
+            args: Parsed express command arguments
+            gpu_type: GPU type of the existing installation (for --exemplar resolution)
+
+        Returns:
+            List of requested workload names, or None to prompt interactively
+        """
+        workloads_arg = getattr(args, 'workloads', None)
+        if workloads_arg:
+            if workloads_arg.lower() == 'all':
+                return ['all']
+            return [w.strip() for w in workloads_arg.split(',') if w.strip()]
+
+        if getattr(args, 'exemplar', False):
+            try:
+                base_keys = get_exemplar_workloads(Path(self.root_dir), gpu_type)
+            except ValueError as e:
+                print(f"Error: {e}")
+                raise SystemExit(EXIT_ERROR) from e
+            return list(base_keys)
+
+        return None
 
     def _collect_express_configuration(self, args: argparse.Namespace) -> InstallConfig:
         """Collect configuration for express mode using saved system config.
@@ -1890,16 +1962,48 @@ class Installer:
                 print("\nInstallation cancelled.")
                 raise SystemExit(EXIT_CANCELLED)
 
-        # NEW: Check for existing installation
+        # Existing installation -> headless incremental add. Reuse the locked
+        # settings, existing llmb_repo (no copy) and existing venvs; take the
+        # workload list from --workloads/--exemplar instead of the interactive
+        # checkbox. This makes `express` symmetric with the interactive
+        # "add workloads to an existing installation" flow but non-interactive.
         cluster_config = self._detect_incremental_install(install_path)
         if cluster_config:
-            print("\nExisting installation detected at this path.")
-            print("Express mode does not support incremental installation.")
-            print("\nTo add workloads to an existing installation:")
-            print("  1. cd to the installation directory")
-            print("  2. Run: llmb-install")
-            print("  3. Select workloads to add")
-            raise SystemExit(EXIT_ERROR)
+            llmb_repo = cluster_config.get('llmb_repo')
+            if not llmb_repo or not os.path.exists(llmb_repo):
+                print(f"\nError: Existing installation at {install_path} cannot be extended.")
+                if llmb_repo:
+                    print(f"The llmb_repo path does not exist: {llmb_repo}")
+                else:
+                    print("The cluster_config.yaml is missing the llmb_repo path.")
+                raise SystemExit(EXIT_ERROR)
+
+            # Load workloads from the installation's own llmb_repo.
+            if llmb_repo != self.root_dir:
+                self.root_dir = llmb_repo
+                self.workloads = build_workload_dict(self.root_dir)
+                if not self.workloads:
+                    print(f"\nError: Could not load workloads from {self.root_dir}")
+                    raise SystemExit(EXIT_ERROR)
+
+            preselected = self._resolve_express_workload_request(args, cluster_config.get('gpu_type'))
+            config, existing_venvs = self._collect_incremental_configuration(
+                'simple',
+                install_path,
+                cluster_config,
+                args,
+                preselected_workloads=preselected,
+            )
+            if not config:
+                print("\nNo workloads selected or none available. Exiting.")
+                raise SystemExit(EXIT_CANCELLED)
+
+            # Flag for _run_express_mode to perform an incremental install (mirrors
+            # the interactive entrance-point-#1 handling and skips confirmation).
+            config._is_incremental = True
+            config._existing_venvs = existing_venvs
+            config._existing_cluster_config = cluster_config
+            return config
 
         # Handle repository copying here (before other prompts)
         dev_mode = getattr(args, 'dev_mode', False)

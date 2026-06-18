@@ -12,6 +12,7 @@ This project uses [PEP 440](https://www.python.org/dev/peps/pep-0440/) versionin
 
 - NVIDIA Run:ai platform support for headless (`--play`) installs via a top-level `platform: runai` key and a `runai:` config block (project, PVC claim/mount, container image, RoCE/GDR extended resources, Multus annotations). Generates a `platform: runai` `cluster_config.yaml` for `llmb-run`. See `example_config_runai.yaml`.
 - Optional Run:ai image pre-pull helper (`LLMB_RUNAI_PREPULL_NODES`, `LLMB_RUNAI_PREPULL`) to warm node containerd caches before the first benchmark.
+- Headless incremental workload add via `express`: when the install path already contains an installation, `express --workloads <list>` (or `--exemplar`) now adds the requested workloads — reusing the locked `cluster_config` settings, existing `llmb_repo` (no repo copy), and existing venvs — instead of exiting. Previously incremental adds were interactive-only (the `questionary` checkbox requires a TTY), which broke automation/CI over non-interactive SSH.
 
 ### Notes
 
