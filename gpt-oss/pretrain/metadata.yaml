@@ -37,8 +37,13 @@ repositories:
     url: "https://github.com/koiker/Megatron-Bridge.git"
     commit: "3a67caec676e61632a19bbce5b5e9b8fb023f165"
   nemo_run:
-    url: "https://github.com/NVIDIA-NeMo/Run.git"
-    commit: "525d68bfce2d6baed86ed3d7d0edbae07833ea0d"
+    # koiker fork — adds PyTorchJobExecutor (Kubeflow Training Operator v1 PyTorchJob)
+    # for NVIDIA Run:ai. Branch is based on upstream 64b91e0, which supersets the prior
+    # pin 525d68b (forward-bump: includes the DGXCloud #458 fix; adds KubeflowExecutor +
+    # PyTorchJobExecutor). Installed via git+url@<branch>.
+    # TODO(runai-PR): revert to upstream NVIDIA-NeMo/Run once v1 PyTorchJob lands.
+    url: "https://github.com/koiker/Run.git"
+    commit: "runai-pytorchjob-v1-deploy"
 
 downloads:
   huggingface:

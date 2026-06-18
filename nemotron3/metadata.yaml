@@ -43,8 +43,12 @@ repositories:
     commit: "3a67caec676e61632a19bbce5b5e9b8fb023f165"
 
   nemo_run:
-    url: "https://github.com/NVIDIA-NeMo/Run.git"
-    commit: "64b91e0187b93475ea0d54028317e349ced7ac1b"
+    # koiker fork — adds PyTorchJobExecutor (Kubeflow Training Operator v1 PyTorchJob)
+    # for NVIDIA Run:ai; branch is based on upstream 64b91e0 (superset: DGXCloudExecutor
+    # + KubeflowExecutor + PyTorchJobExecutor). Installed via git+url@<branch>.
+    # TODO(runai-PR): revert to upstream NVIDIA-NeMo/Run once v1 PyTorchJob lands.
+    url: "https://github.com/koiker/Run.git"
+    commit: "runai-pytorchjob-v1-deploy"
 
 setup:
   venv_req: true
